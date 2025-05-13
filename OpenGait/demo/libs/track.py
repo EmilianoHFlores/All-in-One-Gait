@@ -19,6 +19,7 @@ from pretreatment import pretreat, imgs2inputs
 sys.path.append((os.path.dirname(os.path.abspath(__file__) )) + "/paddle/")
 from seg_demo import seg_image
 from yolox.exp import get_exp
+from ultralytics import YOLO
 
 track_cfgs = {  
     "model":{
@@ -237,3 +238,121 @@ def writeresult(pgdict, video_path, video_save_folder):
     #     with open(res_file, 'w') as f:
     #         f.writelines(results)
     #     logger.info(f"save results to {res_file}")
+    
+    
+def track_ult(video_path, video_save_folder):
+    """Tracks person in the input video using YOLOv8."""
+    
+    model = YOLO('yolo11s.pt')  # load pretrained model
+    
+    cap = cv2.VideoCapture(video_path)
+    width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+
+    os.makedirs(video_save_folder, exist_ok=True)
+    save_video_name = video_path.split("/")[-1]
+    save_video_path = osp.join(video_save_folder, save_video_name)
+    print(f"video save_path is {save_video_path}")
+    vid_writer = cv2.VideoWriter(
+        save_video_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (int(width), int(height))
+    )
+
+    track_results = {}
+    frame_id = 0
+    
+    for i in tqdm(range(frame_count)):
+        ret_val, frame = cap.read()
+        if ret_val:
+            results = model.track(frame, persist=True, classes=0, verbose=False)  # track persons only
+            if results[0].boxes:
+                boxes = results[0].boxes
+                for box in boxes:
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    w = x2 - x1
+                    h = y2 - y1
+                    track_id = int(box.id.cpu().numpy()[0]) if box.id is not None else -1
+                    
+                    if track_id != -1:
+                        if frame_id not in track_results:
+                            track_results[frame_id] = []
+                        track_results[frame_id].append([track_id, x1, y1, w, h])
+                        
+                # Draw boxes and save frame
+                annotated_frame = results[0].plot(color_mode="instance")
+                vid_writer.write(annotated_frame)
+            else:
+                vid_writer.write(frame)
+                
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+        else:
+            break
+        frame_id += 1
+            
+    cap.release()
+    vid_writer.release()
+    return track_results
+
+def writeresult_ult(pgdict, video_path, video_save_folder):
+    """Writes recognition results using YOLOv8."""
+    
+    model = YOLO('yolov8x.pt')
+    
+    cap = cv2.VideoCapture(video_path)
+    width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+
+    os.makedirs(video_save_folder, exist_ok=True)
+    video_name = video_path.split("/")[-1]
+    first_key = next(iter(pgdict))
+    gallery_name = pgdict[first_key].split("-")[0]
+    probe_name = video_name
+    save_video_name = f"G-{gallery_name}_P-{probe_name}"
+    save_video_path = osp.join(video_save_folder, save_video_name)
+    print(f"video save_path is {save_video_path}")
+    
+    vid_writer = cv2.VideoWriter(
+        save_video_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (int(width), int(height))
+    )
+    video_name = video_name.split(".")[0]
+    
+    frame_id = 0
+    for i in tqdm(range(frame_count)):
+        ret_val, frame = cap.read()
+        if ret_val:
+            results = model.track(frame, persist=True, classes=0)
+            if results[0].boxes:
+                boxes = results[0].boxes
+                annotated_frame = frame.copy()
+                
+                for box in boxes:
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    track_id = int(box.id.cpu().numpy()[0]) if box.id is not None else -1
+                    
+                    if track_id != -1:
+                        pid = f"{video_name}-{track_id:03d}"
+                        if pid in pgdict:
+                            tid = pgdict[pid]
+                            colorid = int(tid.split("-")[1])
+                            color = get_color(colorid)
+                            
+                            cv2.rectangle(annotated_frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
+                            cv2.putText(annotated_frame, tid, (int(x1), int(y1)-10), 
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                
+                vid_writer.write(annotated_frame)
+            else:
+                vid_writer.write(frame)
+                
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+        else:
+            break
+        frame_id += 1
+            
+    cap.release()
+    vid_writer.release()
